@@ -51,3 +51,7 @@ cargo run --release --example mooneye -- tests/*.gb # pass/fail for Mooneye test
 ```
 
 No ROMs are included. You need your own game or test ROM files.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
