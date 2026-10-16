@@ -1,0 +1,9 @@
+/target
+
+# Game ROMs and save files are never part of the repository.
+*.gb
+*.gbc
+*.zip
+*.sav
+
+.DS_Store
