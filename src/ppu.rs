@@ -9,6 +9,16 @@ const OAM_SCAN_DOTS: u16 = 80;
 /// Mode 3 takes at least this long. Scrolling, the window and sprites make it longer.
 const MIN_DRAWING_DOTS: u16 = 172;
 
+/// The kinds of CPU access that trigger the OAM corruption bug.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OamBugAccess {
+    Read,
+    /// A write, or a 16-bit increment or decrement of an address in OAM.
+    Write,
+    /// A read and an increment in the same cycle, like `LD A,(HL+)` and `POP`.
+    ReadIncrement,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     HBlank = 0,
@@ -130,6 +140,58 @@ impl Ppu {
     pub fn oam_writable(&self) -> bool {
         let scanning = self.mode == Mode::OamScan && self.visible_mode == Mode::OamScan;
         !scanning && self.visible_mode != Mode::Drawing
+    }
+
+    /// The OAM corruption bug. During OAM scan the PPU reads OAM one 8-byte
+    /// row per machine cycle. If the CPU puts an address in FE00-FEFF on the
+    /// bus at the same time (to read, write, or just to increment or
+    /// decrement a 16-bit register), the row the PPU is reading gets mixed
+    /// with the row before it.
+    pub fn trigger_oam_bug(&mut self, access: OamBugAccess, addr: u16) {
+        if !(0xFE00..=0xFEFF).contains(&addr) || self.mode != Mode::OamScan {
+            return;
+        }
+        // The first row has no row before it, so it's never corrupted.
+        let row = self.dot as usize / 4;
+        if row == 0 {
+            return;
+        }
+
+        if access == OamBugAccess::ReadIncrement && (4..19).contains(&row) {
+            // The row before is mixed with the rows around it, then copied
+            // over the current row and the one two rows back.
+            for i in 0..2 {
+                let a = self.oam[(row - 2) * 8 + i];
+                let b = self.oam[(row - 1) * 8 + i];
+                let c = self.oam[row * 8 + i];
+                let d = self.oam[(row - 1) * 8 + 4 + i];
+                self.oam[(row - 1) * 8 + i] = (b & (a | c | d)) | (a & c & d);
+            }
+            for i in 0..8 {
+                let value = self.oam[(row - 1) * 8 + i];
+                self.oam[row * 8 + i] = value;
+                self.oam[(row - 2) * 8 + i] = value;
+            }
+        }
+
+        // The first word (2 bytes) of the row is mixed with the first and
+        // third words of the row before. The rest of the row is copied from
+        // the row before. The mixing works bit by bit, so it can be done a byte at a time.
+        for i in 0..2 {
+            let a = self.oam[row * 8 + i];
+            let b = self.oam[(row - 1) * 8 + i];
+            let c = self.oam[(row - 1) * 8 + 4 + i];
+            if access == OamBugAccess::Write {
+                self.oam[row * 8 + i] = ((a ^ c) & (b ^ c)) ^ c;
+            } else {
+                let value = b | (a & c);
+                self.oam[row * 8 + i] = value;
+                self.oam[(row - 1) * 8 + i] = value;
+            }
+        }
+        for i in 2..8 {
+            self.oam[row * 8 + i] = self.oam[(row - 1) * 8 + i];
+        }
     }
 
     /// Compares LY with LYC. The comparison runs 4 dots behind LY: for the

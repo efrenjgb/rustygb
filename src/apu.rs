@@ -18,6 +18,11 @@ const CLOCK_RATE: f64 = 4_194_304.0;
 /// don't clip after the high-pass filter.
 const OUTPUT_GAIN: f32 = 0.5;
 
+/// How many clocks after channel 3 reads a sample the CPU can still reach wave RAM.
+const WAVE_ACCESS_WINDOW: u8 = 2;
+/// Retriggering channel 3 this many clocks or fewer before it reads a sample corrupts wave RAM.
+const RETRIGGER_CORRUPTION_WINDOW: u16 = 2;
+
 /// Which of the 8 steps of each square wave are high, for the 4 duty cycles.
 const DUTY_PATTERNS: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
@@ -246,7 +251,10 @@ impl Apu {
                 }
                 value
             }
-            0xFF30..=0xFF3F => self.wave.ram[(addr - 0xFF30) as usize],
+            0xFF30..=0xFF3F => match self.wave.ram_index(addr) {
+                Some(index) => self.wave.ram[index],
+                None => 0xFF,
+            },
             // Write-only registers (the frequencies) and unused addresses.
             _ => 0xFF,
         }
@@ -258,7 +266,9 @@ impl Apu {
             return;
         }
         if (0xFF30..=0xFF3F).contains(&addr) {
-            self.wave.ram[(addr - 0xFF30) as usize] = value;
+            if let Some(index) = self.wave.ram_index(addr) {
+                self.wave.ram[index] = value;
+            }
             return;
         }
         if !self.powered {
@@ -673,6 +683,8 @@ struct WaveChannel {
     timer: u16,
     position: u8,
     sample: u8,
+    /// Clocks since the channel last read a sample from wave RAM.
+    clocks_since_fetch: u8,
     ram: [u8; 16],
 }
 
@@ -687,6 +699,7 @@ impl WaveChannel {
             timer: 0,
             position: 0,
             sample: 0,
+            clocks_since_fetch: u8::MAX,
             ram: [0; 16],
         }
     }
@@ -700,11 +713,13 @@ impl WaveChannel {
 
     /// Advances one clock. Each sample lasts (2048 - frequency) * 2 clocks.
     fn tick(&mut self) {
+        self.clocks_since_fetch = self.clocks_since_fetch.saturating_add(1);
         if self.timer > 0 {
             self.timer -= 1;
         }
         if self.timer == 0 {
             self.timer = (2048 - self.frequency) * 2;
+            self.clocks_since_fetch = 0;
             self.position = (self.position + 1) % 32;
             // Each byte holds two samples, high nibble first.
             let byte = self.ram[self.position as usize / 2];
@@ -715,6 +730,38 @@ impl WaveChannel {
     fn clock_length(&mut self) {
         if self.length.clock() {
             self.enabled = false;
+        }
+    }
+
+    /// Which wave RAM byte a CPU access to `addr` reaches.
+    ///
+    /// While the channel plays, wave RAM is busy. On DMG the CPU only gets
+    /// through in the moment the channel reads a sample, and then it reaches
+    /// the byte the channel is reading, whatever address it used. The rest of
+    /// the time reads give 0xFF and writes are lost.
+    fn ram_index(&self, addr: u16) -> Option<usize> {
+        if !self.enabled {
+            return Some((addr - 0xFF30) as usize);
+        }
+        if self.clocks_since_fetch < WAVE_ACCESS_WINDOW {
+            Some(self.position as usize / 2)
+        } else {
+            None
+        }
+    }
+
+    /// Triggering the channel just as it's about to read a sample corrupts
+    /// the start of wave RAM on DMG: the bytes it was about to read get
+    /// copied over the first ones.
+    fn corrupt_ram_on_retrigger(&mut self) {
+        let next_byte = ((self.position as usize + 1) % 32) / 2;
+        if next_byte < 4 {
+            self.ram[0] = self.ram[next_byte];
+        } else {
+            let start = next_byte & !3;
+            for i in 0..4 {
+                self.ram[i] = self.ram[start + i];
+            }
         }
     }
 
@@ -731,6 +778,9 @@ impl WaveChannel {
             self.enabled = false;
         }
         if value & 0x80 != 0 {
+            if self.enabled && self.timer <= RETRIGGER_CORRUPTION_WINDOW {
+                self.corrupt_ram_on_retrigger();
+            }
             self.enabled = self.dac_enabled;
             self.position = 0;
             // The first sample is fetched after a short delay.

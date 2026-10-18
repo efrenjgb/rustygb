@@ -55,6 +55,23 @@ impl Cpu {
         }
     }
 
+    /// Creates a CPU in its power-on state, ready to run a boot ROM from 0x0000.
+    pub fn power_on() -> Self {
+        Cpu {
+            a: 0,
+            f: 0,
+            b: 0,
+            c: 0,
+            d: 0,
+            e: 0,
+            h: 0,
+            l: 0,
+            sp: 0,
+            pc: 0,
+            ..Cpu::new()
+        }
+    }
+
     // ---------------------------------------------------------------
     // Register helpers
     // ---------------------------------------------------------------
@@ -188,7 +205,7 @@ impl Cpu {
     /// Takes 3 machine cycles: one internal while SP is decremented, then two writes.
     fn push(&mut self, bus: &mut Bus, value: u16) {
         let [high, low] = value.to_be_bytes();
-        bus.tick();
+        bus.increment_cycle(self.sp);
         self.sp = self.sp.wrapping_sub(1);
         bus.write_cycle(self.sp, high);
         self.sp = self.sp.wrapping_sub(1);
@@ -196,7 +213,7 @@ impl Cpu {
     }
 
     fn pop(&mut self, bus: &mut Bus) -> u16 {
-        let low = bus.read_cycle(self.sp);
+        let low = bus.read_increment_cycle(self.sp);
         self.sp = self.sp.wrapping_add(1);
         let high = bus.read_cycle(self.sp);
         self.sp = self.sp.wrapping_add(1);
@@ -257,7 +274,7 @@ impl Cpu {
     fn service_interrupt(&mut self, bus: &mut Bus) {
         self.ime = false;
 
-        bus.tick();
+        bus.increment_cycle(self.sp);
         let [high, low] = self.pc.to_be_bytes();
         self.sp = self.sp.wrapping_sub(1);
         bus.write_cycle(self.sp, high);
@@ -319,25 +336,25 @@ impl Cpu {
             // LD A,(HL+) / LD A,(HL-)
             0x2A => {
                 let hl = self.hl();
-                self.a = bus.read_cycle(hl);
+                self.a = bus.read_increment_cycle(hl);
                 self.set_hl(hl.wrapping_add(1));
             }
             0x3A => {
                 let hl = self.hl();
-                self.a = bus.read_cycle(hl);
+                self.a = bus.read_increment_cycle(hl);
                 self.set_hl(hl.wrapping_sub(1));
             }
 
             // INC rr / DEC rr (no flags, one extra cycle)
             0x03 | 0x13 | 0x23 | 0x33 => {
-                let value = self.read_r16(r16).wrapping_add(1);
-                self.write_r16(r16, value);
-                bus.tick();
+                let value = self.read_r16(r16);
+                bus.increment_cycle(value);
+                self.write_r16(r16, value.wrapping_add(1));
             }
             0x0B | 0x1B | 0x2B | 0x3B => {
-                let value = self.read_r16(r16).wrapping_sub(1);
-                self.write_r16(r16, value);
-                bus.tick();
+                let value = self.read_r16(r16);
+                bus.increment_cycle(value);
+                self.write_r16(r16, value.wrapping_sub(1));
             }
 
             // INC r

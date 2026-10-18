@@ -16,7 +16,7 @@ A Game Boy (DMG) emulator written in simple, readable Rust.
 | Suite | Result |
 |---|---|
 | Blargg `cpu_instrs`, `instr_timing`, `mem_timing` | all pass |
-| Blargg `dmg_sound` | 9 / 12 |
+| Blargg `dmg_sound`, `oam_bug` | all pass |
 | Mooneye acceptance (DMG) | 66 / 66 |
 | Mooneye MBC1 / MBC2 / MBC5 | 12 / 13, 7 / 7, 8 / 8 |
 
@@ -26,7 +26,13 @@ A Game Boy (DMG) emulator written in simple, readable Rust.
 cargo run --release -- path/to/game.gb        # play a ROM
 cargo run --release -- --library path/to/roms # set the ROM folder and open the picker
 cargo run --release                           # open the picker for the saved folder
+cargo run --release -- --boot-rom dmg_boot.bin # run a boot ROM before every game
+cargo run --release -- --boot-rom off          # start games without one again
 ```
+
+The boot ROM setting is remembered, like the library folder. It must be
+256 bytes, like the DMG's own. Without one, games start in the state the
+boot ROM would leave behind.
 
 Games started from the library keep their saves in the app data folder
 (`~/Library/Application Support/rustygb/saves` on macOS). A ROM started
@@ -48,6 +54,7 @@ directly keeps its `.sav` file next to it.
 ```sh
 cargo run --release --example headless -- test.gb   # prints serial output (Blargg tests)
 cargo run --release --example mooneye -- tests/*.gb # pass/fail for Mooneye tests
+cargo run --release --example mooneye -- --boot-rom dmg_boot.bin tests/*.gb
 ```
 
 No ROMs are included. You need your own game or test ROM files.

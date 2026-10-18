@@ -29,6 +29,18 @@ impl GameBoy {
         })
     }
 
+    /// Starts from power on and runs the boot ROM (256 bytes, like the DMG's
+    /// own) before the game, instead of starting in the state it leaves behind.
+    pub fn with_boot_rom(rom: Vec<u8>, boot_rom: Vec<u8>) -> Result<Self, String> {
+        if boot_rom.len() != 0x100 {
+            return Err(format!("boot ROM must be 256 bytes, not {}", boot_rom.len()));
+        }
+        let mut gameboy = GameBoy::new(rom)?;
+        gameboy.cpu = Cpu::power_on();
+        gameboy.bus.power_on(boot_rom);
+        Ok(gameboy)
+    }
+
     /// Runs the emulator until the PPU finishes drawing a frame (the start of
     /// vblank), so `screen()` always shows one whole frame.
     ///

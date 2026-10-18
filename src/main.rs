@@ -44,11 +44,23 @@ const AUDIO_LATENCY_FRAMES: usize = 3;
 const USAGE: &str = "usage:
   rustygb <rom.gb>            play a ROM
   rustygb --library <folder>  set the ROM library folder and open the picker
-  rustygb                     open the picker for the saved library folder";
+  rustygb                     open the picker for the saved library folder
+
+  --boot-rom <file>           run this boot ROM before every game (remembered)
+  --boot-rom off              stop using a boot ROM";
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut settings = Settings::load();
+
+    if let Some(index) = args.iter().position(|arg| arg == "--boot-rom") {
+        let Some(value) = args.get(index + 1).cloned() else {
+            eprintln!("{USAGE}");
+            std::process::exit(1);
+        };
+        args.drain(index..index + 2);
+        set_boot_rom(&mut settings, &value);
+    }
 
     let library = match args.as_slice() {
         [flag, folder] if flag == "--library" => {
@@ -73,13 +85,50 @@ fn main() {
         }
     };
 
-    let mut frontend = Frontend::new();
+    let mut frontend = Frontend::new(load_boot_rom(&settings));
     match library {
         Some(folder) => run_library(&mut frontend, &folder),
         None => {
             // A ROM given directly keeps its save next to it.
             let rom_path = PathBuf::from(&args[0]);
             frontend.play(&rom_path, &rom_path.with_extension("sav"), None);
+        }
+    }
+}
+
+fn set_boot_rom(settings: &mut Settings, value: &str) {
+    if value == "off" {
+        settings.boot_rom = None;
+    } else {
+        let path = PathBuf::from(value);
+        if !path.is_file() {
+            eprintln!("{} is not a file", path.display());
+            std::process::exit(1);
+        }
+        settings.boot_rom = Some(path.canonicalize().unwrap_or(path));
+    }
+    match settings.save() {
+        Ok(()) => match &settings.boot_rom {
+            Some(path) => println!("boot ROM set to {}", path.display()),
+            None => println!("boot ROM turned off"),
+        },
+        Err(error) => eprintln!("could not save settings: {error}"),
+    }
+}
+
+/// Reads the boot ROM from the settings, if there is one. A missing or
+/// broken boot ROM isn't fatal: games just start without it.
+fn load_boot_rom(settings: &Settings) -> Option<Vec<u8>> {
+    let path = settings.boot_rom.as_ref()?;
+    match std::fs::read(path) {
+        Ok(data) if data.len() == 0x100 => Some(data),
+        Ok(data) => {
+            eprintln!("ignoring boot ROM {}: it's {} bytes, not 256", path.display(), data.len());
+            None
+        }
+        Err(error) => {
+            eprintln!("ignoring boot ROM {}: {error}", path.display());
+            None
         }
     }
 }
@@ -132,10 +181,11 @@ struct Frontend {
     audio: Option<AudioOutput>,
     gamepads: Option<Gamepads>,
     pixels: Vec<u32>,
+    boot_rom: Option<Vec<u8>>,
 }
 
 impl Frontend {
-    fn new() -> Self {
+    fn new(boot_rom: Option<Vec<u8>>) -> Self {
         let window = Window::new("rustygb", WINDOW_WIDTH, WINDOW_HEIGHT, WindowOptions::default())
             .expect("could not open window");
 
@@ -151,6 +201,7 @@ impl Frontend {
             audio,
             gamepads,
             pixels: vec![0; WINDOW_WIDTH * WINDOW_HEIGHT],
+            boot_rom,
         }
     }
 
@@ -159,8 +210,10 @@ impl Frontend {
     fn play(&mut self, rom_path: &Path, save_path: &Path, import_save: Option<&Path>) -> GameExit {
         let mut gameboy = match std::fs::read(rom_path)
             .map_err(|error| error.to_string())
-            .and_then(GameBoy::new)
-        {
+            .and_then(|rom| match &self.boot_rom {
+                Some(boot_rom) => GameBoy::with_boot_rom(rom, boot_rom.clone()),
+                None => GameBoy::new(rom),
+            }) {
             Ok(gameboy) => gameboy,
             Err(error) => {
                 eprintln!("could not load {}: {error}", rom_path.display());

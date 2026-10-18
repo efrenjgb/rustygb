@@ -1,7 +1,7 @@
 use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::joypad::{Button, Joypad};
-use crate::ppu::Ppu;
+use crate::ppu::{OamBugAccess, Ppu};
 use crate::serial::Serial;
 use crate::timer::Timer;
 
@@ -30,6 +30,8 @@ pub const INT_JOYPAD: u8 = 0x10;
 ///   FFFF       interrupt enable
 pub struct Bus {
     pub cartridge: Cartridge,
+    /// The boot ROM covers 0000-00FF until it writes to 0xFF50 to hand over to the game.
+    boot_rom: Option<Vec<u8>>,
     wram: [u8; 0x2000],
     hram: [u8; 0x7F],
     pub interrupt_enable: u8,
@@ -62,6 +64,7 @@ impl Bus {
     pub fn new(cartridge: Cartridge) -> Self {
         Bus {
             cartridge,
+            boot_rom: None,
             wram: [0; 0x2000],
             hram: [0; 0x7F],
             interrupt_enable: 0,
@@ -83,6 +86,20 @@ impl Bus {
         }
     }
 
+    /// Puts the hardware in its power-on state and maps the boot ROM, which
+    /// sets everything up the way games expect before handing over to them.
+    pub fn power_on(&mut self, boot_rom: Vec<u8>) {
+        self.boot_rom = Some(boot_rom);
+        self.interrupt_flag = 0;
+        // Measured with the official DMG boot ROM: this is the only value that
+        // matches hardware for both DIV and the serial clock when the game starts.
+        self.timer.counter = 4;
+        // The LCD and the sound start switched off.
+        self.ppu.write_register(0xFF40, 0x00);
+        self.ppu.write_register(0xFF47, 0x00);
+        self.apu.write(0xFF26, 0x00);
+    }
+
     /// Advances the hardware that runs alongside the CPU by one machine cycle.
     pub fn tick(&mut self) {
         self.cycles += 4;
@@ -97,13 +114,31 @@ impl Bus {
     /// A CPU memory read, which takes one machine cycle.
     pub fn read_cycle(&mut self, addr: u16) -> u8 {
         self.tick();
+        self.ppu.trigger_oam_bug(OamBugAccess::Read, addr);
+        self.read(addr)
+    }
+
+    /// A CPU memory read that also increments the register holding the
+    /// address, like `LD A,(HL+)` and `POP`. Only differs for the OAM bug.
+    pub fn read_increment_cycle(&mut self, addr: u16) -> u8 {
+        self.tick();
+        self.ppu.trigger_oam_bug(OamBugAccess::ReadIncrement, addr);
         self.read(addr)
     }
 
     /// A CPU memory write, which takes one machine cycle.
     pub fn write_cycle(&mut self, addr: u16, value: u8) {
         self.tick();
+        self.ppu.trigger_oam_bug(OamBugAccess::Write, addr);
         self.write(addr, value);
+    }
+
+    /// An internal machine cycle where the CPU increments or decrements a
+    /// 16-bit register. The register's value is put on the address bus,
+    /// which can trigger the OAM bug.
+    pub fn increment_cycle(&mut self, addr: u16) {
+        self.tick();
+        self.ppu.trigger_oam_bug(OamBugAccess::Write, addr);
     }
 
     /// Interrupts that are both requested and enabled.
@@ -160,6 +195,11 @@ impl Bus {
     }
 
     fn read_unblocked(&self, addr: u16) -> u8 {
+        if let Some(boot_rom) = &self.boot_rom
+            && addr < 0x100
+        {
+            return boot_rom[addr as usize];
+        }
         match addr {
             0x0000..=0x7FFF => self.cartridge.read_rom(addr),
             0x8000..=0x9FFF => self.ppu.vram[(addr - 0x8000) as usize],
@@ -199,6 +239,7 @@ impl Bus {
             0xFF0F => self.interrupt_flag = value & 0x1F,
             0xFF10..=0xFF3F => self.apu.write(addr, value),
             0xFF46 => self.start_dma(value),
+            0xFF50 if value != 0 => self.boot_rom = None,
             0xFF40..=0xFF4B => self.interrupt_flag |= self.ppu.write_register(addr, value),
             0xFF00..=0xFF7F => {}
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
