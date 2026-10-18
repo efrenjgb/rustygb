@@ -32,8 +32,6 @@ pub struct Bus {
     pub cartridge: Cartridge,
     wram: [u8; 0x2000],
     hram: [u8; 0x7F],
-    /// Registers we don't emulate are just stored here.
-    io: [u8; 0x80],
     pub interrupt_enable: u8,
     pub interrupt_flag: u8,
     pub ppu: Ppu,
@@ -66,7 +64,6 @@ impl Bus {
             cartridge,
             wram: [0; 0x2000],
             hram: [0; 0x7F],
-            io: [0; 0x80],
             interrupt_enable: 0,
             interrupt_flag: 0xE1,
             ppu: Ppu::new(),
@@ -178,7 +175,8 @@ impl Bus {
             0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF46 => self.dma.register,
             0xFF40..=0xFF4B => self.ppu.read_register(addr),
-            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
+            // Unused I/O addresses aren't connected to anything and read as all 1s.
+            0xFF00..=0xFF7F => 0xFF,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.interrupt_enable,
         }
@@ -202,7 +200,7 @@ impl Bus {
             0xFF10..=0xFF3F => self.apu.write(addr, value),
             0xFF46 => self.start_dma(value),
             0xFF40..=0xFF4B => self.interrupt_flag |= self.ppu.write_register(addr, value),
-            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
+            0xFF00..=0xFF7F => {}
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
             0xFFFF => self.interrupt_enable = value,
         }

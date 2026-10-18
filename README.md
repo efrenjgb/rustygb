@@ -7,7 +7,7 @@ A Game Boy (DMG) emulator written in simple, readable Rust.
 - Complete Sharp LR35902 CPU, accurate to the machine cycle
 - PPU with background, window and sprites, stepped one dot at a time
 - Sound: both square channels, wave and noise, played through `cpal`
-- Cartridges: ROM only, MBC1, MBC3 (with real-time clock) and MBC5, with battery saves
+- Cartridges: ROM only, MBC1, MBC2, MBC3 (with real-time clock) and MBC5, with battery saves
 - Keyboard and game controller input (`gilrs`)
 - A ROM library picker
 
@@ -17,8 +17,8 @@ A Game Boy (DMG) emulator written in simple, readable Rust.
 |---|---|
 | Blargg `cpu_instrs`, `instr_timing`, `mem_timing` | all pass |
 | Blargg `dmg_sound` | 9 / 12 |
-| Mooneye acceptance (DMG) | 64 / 66 |
-| Mooneye MBC1 / MBC5 | 12 / 13, 8 / 8 |
+| Mooneye acceptance (DMG) | 66 / 66 |
+| Mooneye MBC1 / MBC2 / MBC5 | 12 / 13, 7 / 7, 8 / 8 |
 
 ## Running
 

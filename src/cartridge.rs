@@ -2,6 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const ROM_BANK_SIZE: usize = 0x4000;
 const RAM_BANK_SIZE: usize = 0x2000;
+/// MBC2 has 512 half-byte cells of RAM built into the chip.
+const MBC2_RAM_SIZE: usize = 512;
 
 /// A game cartridge: its ROM, optional RAM, and the memory bank controller
 /// (MBC) chip that decides which part of the ROM/RAM the CPU can see.
@@ -27,6 +29,11 @@ enum Mbc {
         upper_bits: u8,
         /// When set, `upper_bits` also applies to 0000-3FFF and the RAM area.
         advanced_mode: bool,
+    },
+    Mbc2 {
+        ram_enabled: bool,
+        /// 4-bit ROM bank number.
+        rom_bank: u8,
     },
     Mbc3 {
         ram_enabled: bool,
@@ -54,7 +61,7 @@ impl Cartridge {
         }
 
         let cartridge_type = rom[0x147];
-        let ram_size = match rom[0x149] {
+        let mut ram_size = match rom[0x149] {
             0x02 => RAM_BANK_SIZE,
             0x03 => RAM_BANK_SIZE * 4,
             0x04 => RAM_BANK_SIZE * 16,
@@ -87,6 +94,8 @@ impl Cartridge {
             0x00 => (Mbc::RomOnly, false),
             0x01 | 0x02 => (mbc1, false),
             0x03 => (mbc1, true),
+            0x05 => (Mbc::Mbc2 { ram_enabled: false, rom_bank: 1 }, false),
+            0x06 => (Mbc::Mbc2 { ram_enabled: false, rom_bank: 1 }, true),
             0x11 | 0x12 => (mbc3, false),
             0x0F | 0x10 | 0x13 => (mbc3, true),
             0x19 | 0x1A => (mbc5(false), false),
@@ -95,6 +104,11 @@ impl Cartridge {
             0x1E => (mbc5(true), true),
             other => return Err(format!("unsupported cartridge type {other:#04X}")),
         };
+
+        // MBC2 headers say there's no RAM, because it's inside the MBC chip.
+        if let Mbc::Mbc2 { .. } = mbc {
+            ram_size = MBC2_RAM_SIZE;
+        }
 
         Ok(Cartridge {
             rom,
@@ -131,7 +145,7 @@ impl Cartridge {
                 };
                 bank as usize
             }
-            Mbc::Mbc3 { rom_bank, .. } => {
+            Mbc::Mbc2 { rom_bank, .. } | Mbc::Mbc3 { rom_bank, .. } => {
                 if addr < 0x4000 { 0 } else { *rom_bank as usize }
             }
             Mbc::Mbc5 { rom_bank, .. } => {
@@ -160,6 +174,20 @@ impl Cartridge {
                 0x4000..=0x5FFF => *upper_bits = value & 0x03,
                 _ => *advanced_mode = value & 0x01 != 0,
             },
+            Mbc::Mbc2 {
+                ram_enabled,
+                rom_bank,
+            } => {
+                // Both registers live in 0000-3FFF. Address bit 8 picks which one.
+                if addr >= 0x4000 {
+                    return;
+                }
+                if addr & 0x0100 == 0 {
+                    *ram_enabled = value & 0x0F == 0x0A;
+                } else {
+                    *rom_bank = (value & 0x0F).max(1);
+                }
+            }
             Mbc::Mbc3 {
                 ram_enabled,
                 rom_bank,
@@ -212,6 +240,13 @@ impl Cartridge {
                 self.ram_index(bank, addr)
                     .map_or(0xFF, |index| self.ram[index])
             }
+            Mbc::Mbc2 { ram_enabled, .. } => {
+                if !*ram_enabled {
+                    return 0xFF;
+                }
+                // Only the low 4 bits exist. The 512 cells repeat across A000-BFFF.
+                self.ram[addr as usize & 0x1FF] | 0xF0
+            }
             Mbc::Mbc3 {
                 ram_enabled,
                 ram_bank,
@@ -256,6 +291,12 @@ impl Cartridge {
                     return;
                 }
                 if *advanced_mode { *upper_bits } else { 0 }
+            }
+            Mbc::Mbc2 { ram_enabled, .. } => {
+                if *ram_enabled {
+                    self.ram[addr as usize & 0x1FF] = value & 0x0F;
+                }
+                return;
             }
             Mbc::Mbc3 {
                 ram_enabled,
@@ -483,6 +524,23 @@ mod tests {
         rom[0x147] = 0x1B; // MBC5 + RAM + battery
         rom[0x149] = 0x04; // 128KB RAM
         Cartridge::new(rom).unwrap()
+    }
+
+    #[test]
+    fn mbc2_ram_is_512_half_bytes() {
+        let mut rom = vec![0; ROM_BANK_SIZE * 16];
+        rom[0x147] = 0x06; // MBC2 + battery
+        let mut cart = Cartridge::new(rom).unwrap();
+        cart.write_rom(0x0000, 0x0A);
+        cart.write_ram(0xA000, 0x5A);
+        // Only the low 4 bits are stored, and the cells repeat every 512 bytes.
+        assert_eq!(cart.read_ram(0xA000), 0xFA);
+        assert_eq!(cart.read_ram(0xA200), 0xFA);
+        // Address bit 8 set means the write goes to the ROM bank register instead.
+        cart.write_rom(0x0100, 0x0A);
+        assert_eq!(cart.read_ram(0xA000), 0xFA);
+        cart.write_rom(0x0000, 0x00);
+        assert_eq!(cart.read_ram(0xA000), 0xFF);
     }
 
     #[test]

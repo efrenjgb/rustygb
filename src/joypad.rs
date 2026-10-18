@@ -23,7 +23,8 @@ pub struct Joypad {
 impl Joypad {
     pub fn new() -> Self {
         Joypad {
-            select: 0x30,
+            // The boot ROM leaves both groups selected, so P1 reads 0xCF.
+            select: 0x00,
             directions: 0x0F,
             actions: 0x0F,
         }
