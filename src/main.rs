@@ -13,7 +13,7 @@ use rustygb::joypad::Button;
 use rustygb::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use settings::Settings;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The classic green DMG shades, from lightest to darkest.
 const PALETTE: [u32; 4] = [0xE0F8D0, 0x88C070, 0x346856, 0x081820];
@@ -40,6 +40,11 @@ const AUTOSAVE_FRAMES: u32 = 600;
 /// How much audio to keep queued ahead of the sound card, in video frames
 /// (about 50ms). Enough that it never runs dry, small enough not to lag.
 const AUDIO_LATENCY_FRAMES: usize = 3;
+
+/// The longest the main loop waits for the sound card to play queued audio.
+/// Normally it takes a few milliseconds. If the sound card stops taking
+/// audio, the game carries on instead of freezing.
+const MAX_AUDIO_WAIT: Duration = Duration::from_millis(100);
 
 const USAGE: &str = "usage:
   rustygb <rom.gb>            play a ROM
@@ -205,6 +210,18 @@ impl Frontend {
         }
     }
 
+    /// With sound, the sound card's clock decides when to run the next frame.
+    /// Without it, minifb's frame limiter keeps us at 60 fps.
+    fn start_audio(&mut self, gameboy: &mut GameBoy) {
+        match &self.audio {
+            Some(audio) => {
+                gameboy.enable_audio(audio.sample_rate);
+                self.window.set_target_fps(0);
+            }
+            None => self.window.set_target_fps(60),
+        }
+    }
+
     /// Runs a game until it's left or the window is closed.
     /// `import_save` is a save to start from if `save_path` doesn't exist yet.
     fn play(&mut self, rom_path: &Path, save_path: &Path, import_save: Option<&Path>) -> GameExit {
@@ -229,15 +246,7 @@ impl Frontend {
         let title = format!("rustygb - {}", gameboy.bus.cartridge.title());
         self.window.set_title(&title);
 
-        // With sound, the sound card's clock decides when to run the next frame.
-        // Without it, minifb's frame limiter keeps us at 60 fps.
-        match &self.audio {
-            Some(audio) => {
-                gameboy.enable_audio(audio.sample_rate);
-                self.window.set_target_fps(0);
-            }
-            None => self.window.set_target_fps(60),
-        }
+        self.start_audio(&mut gameboy);
 
         let mut frame_count: u32 = 0;
         let exit = loop {
@@ -258,6 +267,15 @@ impl Frontend {
                 gameboy.bus.set_button(button, self.window.is_key_down(key) || on_controller);
             }
 
+            // Switching the sound output (like plugging in headphones) stops
+            // the stream, so open the new default device.
+            if self.audio.as_ref().is_some_and(|audio| audio.has_failed()) {
+                self.audio = AudioOutput::new()
+                    .inspect_err(|error| eprintln!("running without sound: {error}"))
+                    .ok();
+                self.start_audio(&mut gameboy);
+            }
+
             gameboy.run_frame();
             if let Some(audio) = &self.audio {
                 audio.push(&gameboy.take_audio_samples());
@@ -270,7 +288,8 @@ impl Frontend {
 
             if let Some(audio) = &self.audio {
                 let target = audio.sample_rate as usize / 60 * AUDIO_LATENCY_FRAMES;
-                while audio.queued_frames() > target {
+                let wait_start = Instant::now();
+                while audio.queued_frames() > target && wait_start.elapsed() < MAX_AUDIO_WAIT {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }

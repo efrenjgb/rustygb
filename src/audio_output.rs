@@ -7,11 +7,15 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub struct AudioOutput {
     queue: Arc<Mutex<VecDeque<f32>>>,
     pub sample_rate: u32,
+    /// Set when the stream stops working, for example when the default
+    /// output device changes because headphones were plugged in.
+    failed: Arc<AtomicBool>,
     /// The stream stops playing when dropped, so keep it alive.
     _stream: cpal::Stream,
 }
@@ -28,11 +32,13 @@ impl AudioOutput {
             .map_err(|error| error.to_string())?;
         let sample_rate = supported.sample_rate();
         let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let failed = Arc::new(AtomicBool::new(false));
 
+        let config = supported.config();
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => build_stream::<f32>(&device, supported.config(), &queue),
-            cpal::SampleFormat::I16 => build_stream::<i16>(&device, supported.config(), &queue),
-            cpal::SampleFormat::U16 => build_stream::<u16>(&device, supported.config(), &queue),
+            cpal::SampleFormat::F32 => build_stream::<f32>(&device, config, &queue, &failed),
+            cpal::SampleFormat::I16 => build_stream::<i16>(&device, config, &queue, &failed),
+            cpal::SampleFormat::U16 => build_stream::<u16>(&device, config, &queue, &failed),
             other => return Err(format!("unsupported sample format {other}")),
         }?;
         stream.play().map_err(|error| error.to_string())?;
@@ -40,6 +46,7 @@ impl AudioOutput {
         Ok(AudioOutput {
             queue,
             sample_rate,
+            failed,
             _stream: stream,
         })
     }
@@ -54,6 +61,11 @@ impl AudioOutput {
         self.queue.lock().unwrap().clear();
     }
 
+    /// Whether the stream has stopped working and needs to be opened again.
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
+
     /// How many stereo frames are waiting to be played.
     pub fn queued_frames(&self) -> usize {
         self.queue.lock().unwrap().len() / 2
@@ -64,12 +76,14 @@ fn build_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     queue: &Arc<Mutex<VecDeque<f32>>>,
+    failed: &Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
     let channels = config.channels as usize;
     let queue = Arc::clone(queue);
+    let failed = Arc::clone(failed);
 
     device
         .build_output_stream(
@@ -91,7 +105,10 @@ where
                     }
                 }
             },
-            |error| eprintln!("audio error: {error}"),
+            move |error| {
+                eprintln!("audio error: {error}");
+                failed.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|error| error.to_string())
